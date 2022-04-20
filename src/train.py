@@ -1,20 +1,31 @@
 from tqdm.autonotebook import tqdm
 
 import torch
+import gc
+import numpy as np
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from transformers.data.data_collator import DataCollatorWithPadding
+from transformers.tokenization_utils_base import BatchEncoding
+from transformers.data.data_collator import DataCollatorWithPadding, DataCollator
 
 
 def tokenize(sample, tokenizer):
     """Tokenize sample"""
     
-    sample = tokenizer(sample['text'], truncation=True, padding=False, return_length=True)
+    # get field to 
+    for field in ['text', 'content', 'question_title']:
+        
+        if field in sample.keys():
+    
+            sample = tokenizer(sample[field], truncation=True, padding=False, return_length=True)
     
     return sample
 
 
-def load_and_tokenize_dataset(dataset_name, model_name='bert-base-uncased', cache_dir='cache_dir/'):
+def load_and_tokenize_dataset(dataset_name, 
+                              model_name='bert-base-uncased', 
+                              sort=False, 
+                              cache_dir='cache_dir/'):
     """
     Load dataset from the datasets library of HuggingFace.
     Tokenize and sort data by length.
@@ -27,16 +38,33 @@ def load_and_tokenize_dataset(dataset_name, model_name='bert-base-uncased', cach
     dataset = load_dataset(dataset_name, cache_dir=cache_dir)
     
     # Rename label column for tokenization purposes
-    dataset = dataset.rename_column('label', 'labels')
+    for label in ['label', 'label-coarse', 'topic']:
+        if label in dataset.column_names['train']:
+            dataset = dataset.rename_column(label, 'labels')
     
     # Tokenize data
     dataset = dataset.map(lambda x: tokenize(x, tokenizer), batched=True)
     
     # sorting dataset
     for split in dataset.keys():
-        dataset[split] = dataset[split].sort("length")
+        if sort:
+            # *** NOTE ***
+            # the "flatten_indices()" is crucial to obtain good results
+            dataset[split] = dataset[split].sort("length")#.flatten_indices()
+#         else:
+#             dataset[split] = dataset[split]#.flatten_indices() # already shuffled
     
     return dataset, tokenizer, model_name
+
+
+
+def empty_cuda_memory():
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+                del(obj)
+        except: pass
+
 
 
 def process_dataset(dataset, model, tokenizer, device=torch.device('cpu'), batch_size=256):
@@ -56,26 +84,80 @@ def process_dataset(dataset, model, tokenizer, device=torch.device('cpu'), batch
         Tuple of outputs and labels resulting from passing the dataset into the model.
     """
     
-    dataloader = torch.utils.data.DataLoader(dataset, 
+    dataloader = torch.utils.data.DataLoader(dataset,
+                                             # shuffle=False,
+                                             drop_last=False,
                                              batch_size=batch_size, 
-                                             collate_fn=DataCollatorWithPadding(tokenizer))
+                                             collate_fn=DataCollatorWithPadding(tokenizer)
+                                            )
     
-    outputs_t = torch.Tensor().to(device)
-    labels_t = torch.Tensor().to(device)
-
+    # Accumulate tensors a long as enough CUDA memory is available.
+    # When CUDA memory is full:
+    # 1. convert tensor into numpy
+    # 2. empty CUDA cache
+    # 3. start new accumulation
+    
+    # numpy tensors (for micro accumlation steps)        
+    dim = model.pooling_dim + dataset[0]['additional_fts'].shape[0]
+    outputs_np = np.empty(shape=(0, dim))
+    labels_np = np.empty(shape=(0))
+    
+    # torch tensors (for macro accumlation steps)
+    outputs_t = torch.empty(size=(0, dim), device=device)
+    labels_t = torch.empty(size=(0,), device=device)
+    
     for i, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
-
-        batch = batch.to(device)
-        outputs = model(batch)
-        outputs_t = torch.cat([outputs_t, outputs], dim=0)
-
-        labels = batch['labels']
-        labels_t = torch.cat([labels_t, labels], dim=0)
+                        
+        try: # enough CUDA memory
+                        
+            # micro-accumulate embeddings (torch) and labels (torch)
+            batch = batch.to(device)
+            outputs_t = torch.cat([outputs_t, model(batch)], dim=0)
+            labels_t = torch.cat([labels_t, batch['labels']], dim=0)
+            
+        except RuntimeError: # not enough CUDA memory
+            
+            print("Macro accumulation step...")
+            # print(torch.cuda.memory_summary()) # XXX
+                        
+            # macro-accumulate embeddings and labels (numpy)
+            outputs_np = np.concatenate([outputs_t.cpu().numpy(), outputs_np], axis=0)
+            labels_np = np.concatenate([labels_t.cpu().numpy(), labels_np], axis=0)
+            
+            # free CUDA memory
+            del outputs_t, labels_t
+            torch.cuda.empty_cache()
+            
+            # new empty embeddings (torch) and labels (torch)
+            outputs_t = torch.empty(size=(0, dim), device=device)
+            labels_t = torch.empty(size=(0,), device=device)
     
-    outputs_t = outputs_t.cpu().numpy()
-    labels_t = labels_t.cpu().numpy()
+            # micro-accumulate embeddings (torch) and labels (torch)
+            batch = batch.to(device)
+            # print(torch.cuda.memory_summary()) # XXX
+            outputs_t = torch.cat([outputs_t, model(batch)], dim=0)
+            labels_t = torch.cat([labels_t, batch['labels']], dim=0)
+            
+    # accumulate final embeddings and labels (numpy)
+    outputs_np = np.concatenate([outputs_t.cpu().numpy(), outputs_np], axis=0)
+    labels_np = np.concatenate([labels_t.cpu().numpy(), labels_np], axis=0)
     
-    return outputs_t, labels_t
+# ORIGINAL
+#         batch = batch.to(device)
+#         outputs = model(batch)
+#         outputs_t = torch.cat([outputs_t, outputs], dim=0)
+
+#         labels = batch['labels']
+#         labels_t = torch.cat([labels_t, labels], dim=0)
+    
+#     outputs_t = outputs_t.cpu().numpy()
+#     labels_t = labels_t.cpu().numpy()
+    
+#     print(outputs_t.shape)
+    
+#     return outputs_t, labels_t
+    
+    return outputs_np, labels_np
 
 
 def train_learning_algo(learning_algo, dataset, model, tokenizer, 

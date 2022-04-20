@@ -6,14 +6,20 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from transformers import BertModel, DistilBertModel
 
 
-def get_tfidf_features(dataset, dim=4000):
+def get_tfidf_features(dataset, dim=3000):
     """Compute tf-idf features and add it as a new field for the dataset"""
     
+    # get column of interest
+    for field in ['text', 'content', 'question_title']:
+        if field in dataset['train'].column_names:
+            text_field = field
+            break
+    
     vectorizer = TfidfVectorizer(max_features=dim)
-    vectorizer.fit(dataset['train']['text'])
+    vectorizer.fit(dataset['train'][text_field])
         
     for split in dataset.keys():
-        X_tmp = vectorizer.transform(dataset[split]['text'])
+        X_tmp = vectorizer.transform(dataset[split][text_field])
         X_tmp = list(X_tmp.todense())
         X_tmp = [np.asarray(row).reshape(-1) for row in X_tmp]
         
@@ -22,8 +28,12 @@ def get_tfidf_features(dataset, dim=4000):
         dataset[split] = dataset[split].add_column("additional_fts", X_tmp)
         dataset[split]._indices = indices # ***
         
-        dataset[split].set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels', 'length', 'additional_fts'])
-        dataset[split] = dataset[split].remove_columns("text")
+        dataset[split].set_format(type='torch', columns=['input_ids', 
+                                                         'attention_mask',
+                                                         'labels', 
+                                                         'length', 
+                                                         'additional_fts'])
+        dataset[split] = dataset[split].remove_columns(text_field)
         
     return dataset
 
@@ -33,15 +43,13 @@ class Embedding(nn.Module):
     Implements an embedding layer.
     """
 
-    def __init__(self, model_name='bert-base-uncased', pooling='mean', device=torch.device('cpu')):
+    def __init__(self, 
+                 model_name='bert-base-uncased', 
+                 pooling='mean', 
+                 device=torch.device('cpu')):
         
         """
         Constructor
-
-        Parameters
-        ----------
-        model_name : str
-            Name of the BERT model and tokenizer.
 
         Attributes
         ----------
@@ -49,9 +57,12 @@ class Embedding(nn.Module):
             Name of the BERT model and tokenizer.
             The list of or possible models is provided here: https://huggingface.co/models
         pooling : str
-            Pooling strategy to be applied, either 'mean' or 'cls'.
+            Pooling strategy to be applied: 'mean', 'mean_std', cls', 'mean_cls', or 'mean_std_cls'.
             For 'mean', the sentence embedding is the mean of the token embeddings.
+            For 'mean_std', the sentence embedding is concatenation of the mean and the std of the token embeddings.
             For 'cls', the sentence embedding is the embedding of the [CSL] token (as usual in BERT).
+            For 'mean_cls', the sentence embedding is the concatenation of the 'mean' and the 'cls' embeddings.
+            For 'mean_std_cls', the sentence embedding is the concatenation of the 'mean', 'std' and the 'cls' embeddings.
         device : torch.device
             GPU is available, CPU otherwise.
         """
@@ -96,42 +107,97 @@ class Embedding(nn.Module):
 #             # cf. https://discuss.pytorch.org/t/modify-array-with-list-of-indices/27739
 #             batch['attention_mask'][indices[:, 0], indices[:, 1]] = 0
             
-            if self.pooling == 'mean':
+            if (self.pooling == 'mean') or (self.pooling == 'mean_cls'):
                 
                 batch_emb = self.model(batch["input_ids"], batch["attention_mask"])[0]
-                # batch_emb = torch.mean(batch_emb, dim=1)
-                # batch_emb = batch_emb.transpose(0, 1)
-                # batch_emb = batch_emb[:, :, :] # removing CLS and/or SEP does not seem to improve
-                batch_emb = torch.sum(batch_emb, dim=1).transpose(0, 1)
-                batch_emb = torch.div(batch_emb, batch['length']).transpose(0, 1)
+
+                batch_emb = torch.mean(batch_emb, dim=1)
+                
+                if self.pooling == 'mean_cls':
+
+                    batch_emb_cls = self.model(batch["input_ids"], batch["attention_mask"])[1]
+                    batch_emb = torch.cat([batch_emb, batch_emb_cls], dim=1)
+                
+            if (self.pooling == 'mean_std') or (self.pooling == 'mean_std_cls'):
+                
+                batch_emb = self.model(batch["input_ids"], batch["attention_mask"])[0]
+                
+                batch_mean = torch.mean(batch_emb, dim=1)
+                batch_std = torch.std(batch_emb, dim=1)  
+                
+                batch_emb = torch.cat([batch_mean, batch_std], dim=1)
+                                
+                if self.pooling == 'mean_std_cls':
+
+                    batch_emb_cls = self.model(batch["input_ids"], batch["attention_mask"])[1]
+                    batch_emb = torch.cat([batch_emb, batch_emb_cls], dim=1)
             
             elif self.pooling == 'cls':
             
                 batch_emb = self.model(batch["input_ids"], batch["attention_mask"])[1]
-
+                            
             return batch_emb
 
-        
+
 class BertTFIDF(nn.Module):
     """
     Impdements BERT + TF-IDF model:
     Concatenate BERT (or similar model) sentence embedding to most relevant TF-IDF features.
     """
     
-    def __init__(self, model_name='bert-base-uncased', device=torch.device('cpu')):
+    def __init__(self, 
+                 model_name='bert-base-uncased', 
+                 pooling='mean',
+                 mode='default', 
+                 device=torch.device('cpu')):
+        
+        """
+        Constructor
+
+        Attributes
+        ----------
+        model_name : str
+            Name of the BERT model and tokenizer.
+            The list of or possible models is provided here: https://huggingface.co/models
+        pooling : str
+            Pooling strategy to be applied: 'mean', 'mean_std', 'cls', 'mean_cls', 'mean_std_cls'.
+            For 'mean', the sentence embedding is the mean of the token embeddings.
+            For 'std', the sentence embedding is the std of the token embeddings.
+            For 'cls', the sentence embedding is the embedding of the [CSL] token (as usual in BERT).
+            Other combinations refer to the concatenation of those embeddings.
+        mode : str
+            Three possible modes: 'default', 'bert_only', or 'tfidf_only'.
+            The 'default' mode concatenates the BERT embedding and the TF-IDF features.
+            The 'bert_only' only considers the BERT embedding (no TF-IDF features).
+            The 'tfidf_only' only considers the TF-IDF features (no BERT embedding).
+        device : torch.device
+            GPU is available, CPU otherwise.
+        """
         
         super(BertTFIDF, self).__init__()
         
         self.model_name = model_name
+        self.pooling = pooling
+        self.pooling_dim = 768 * (self.pooling.count('_') + 1)
+        self.mode = mode
         self.device = device
         
-        self.embedding = Embedding(model_name=self.model_name, device=self.device)
+        self.embedding = Embedding(model_name=self.model_name, 
+                                   pooling=self.pooling, 
+                                   device=self.device)
         
     def forward(self, batch):
         
-        embedded_input = self.embedding(batch)
-        additional_fts = batch['additional_fts']
+        if self.mode == 'default':
+            embedded_input = self.embedding(batch)
+            additional_fts = batch['additional_fts']
+            output = torch.cat([embedded_input, additional_fts], dim=1)
+            
+        elif self.mode == 'bert_only':
+            output = self.embedding(batch)
         
-        output = torch.cat([embedded_input, additional_fts], dim=1)
+        elif self.mode == 'tfidf_only':
+            output = batch['additional_fts']
         
         return output
+    
