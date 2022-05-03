@@ -25,6 +25,7 @@ def tokenize(sample, tokenizer):
 def load_and_tokenize_dataset(dataset_name, 
                               model_name='bert-base-uncased', 
                               sort=False, 
+                              eval_mode = False,
                               cache_dir='cache_dir/'):
     """
     Load dataset from the datasets library of HuggingFace.
@@ -36,7 +37,7 @@ def load_and_tokenize_dataset(dataset_name,
     
     # Load dataset
     dataset = load_dataset(dataset_name, cache_dir=cache_dir)
-    
+        
     # Rename label column for tokenization purposes
     for label in ['label', 'label-coarse', 'topic']:
         if label in dataset.column_names['train']:
@@ -48,8 +49,6 @@ def load_and_tokenize_dataset(dataset_name,
     # sorting dataset
     for split in dataset.keys():
         if sort:
-            # *** NOTE ***
-            # the "flatten_indices()" is crucial to obtain good results
             dataset[split] = dataset[split].sort("length")#.flatten_indices()
 #         else:
 #             dataset[split] = dataset[split]#.flatten_indices() # already shuffled
@@ -107,7 +106,7 @@ def process_dataset(dataset, model, tokenizer, device=torch.device('cpu'), batch
     labels_t = torch.empty(size=(0,), device=device)
     
     for i, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
-                        
+
         try: # enough CUDA memory
                         
             # micro-accumulate embeddings (torch) and labels (torch)
@@ -178,6 +177,12 @@ def train_learning_algo(learning_algo, dataset, model, tokenizer,
     return learning_algo
 
 
+# Note:
+# In the last version of experiment.py, this function is not used.
+# Instead, the processing of the test set (i.e., process_dataset(dataset['test'],...))
+# and the prediction step (i.e., learning_algo.predict(X_test)) are performed separately.
+# In this way, the processing an be performed only once, while several learning algos 
+# (alpha's loop) can be tested for predictions (cf. experiment.py for further details).
 def predict(learning_algo, dataset, model, tokenizer, 
             device=torch.device('cpu'), batch_size=256, mode='test'):
     """

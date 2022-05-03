@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -46,7 +47,8 @@ class Embedding(nn.Module):
     def __init__(self, 
                  model_name='bert-base-uncased', 
                  pooling='mean', 
-                 device=torch.device('cpu')):
+                 device=torch.device('cpu'), 
+                 results_dir='/raid/home/jeremiec/Data/TextClassification/'):
         
         """
         Constructor
@@ -72,10 +74,51 @@ class Embedding(nn.Module):
         self.model_name = model_name
         self.pooling = pooling
         self.device = device
-        self.model = BertModel.from_pretrained(self.model_name, output_hidden_states=True)
+        if os.path.exists(os.path.join(results_dir, 'config.json')):
+            self.model = BertModel.from_pretrained(results_dir)
+        else:
+            self.model = BertModel.from_pretrained(self.model_name, output_hidden_states=True)
         self.model.to(self.device).eval()
         print('Model downloaded:', model_name)
 
+        
+    def tensor_mean(self, batch, mode='custom', length_t=None):
+        """Computes different kinds of means of batch embedding tensors.
+        
+        Parameters
+        ----------
+        batch: torch.Tensor
+            3D tensor (batch size x max sentence length x embedding dim)
+            BERT embedding of the batch of texts.
+            
+        Returns
+        -------
+        mean_batch : torch.Tensor
+            2D tensor (batch size x embedding dim)
+        """
+        
+        if mode == 'classic':
+            
+            mean_batch = torch.mean(batch, dim=1)
+        
+        elif mode == 'custom':
+            
+            batch_size = batch.shape[0]
+            max_length = batch.shape[1]
+            emb_dim = batch.shape[2]
+            
+            tmp_t = torch.arange(1, max_length + 1).to(self.device)
+            tmp_t = tmp_t.expand(batch_size, max_length).transpose(0,1)
+            mask = (tmp_t <= length_t).expand(emb_dim, max_length, batch_size).transpose(0, 2)
+            
+            batch = batch * mask
+            batch = batch.sum(dim=1).transpose(0, 1)
+            
+            mean_batch = torch.div(batch, length_t).transpose(0, 1)
+
+        return mean_batch
+
+        
     def forward(self, batch):
         """
         Embeds a batch of token ids into a 3D tensor.
@@ -110,8 +153,8 @@ class Embedding(nn.Module):
             if (self.pooling == 'mean') or (self.pooling == 'mean_cls'):
                 
                 batch_emb = self.model(batch["input_ids"], batch["attention_mask"])[0]
-
-                batch_emb = torch.mean(batch_emb, dim=1)
+                                
+                batch_emb = self.tensor_mean(batch_emb, length_t=batch["length"])
                 
                 if self.pooling == 'mean_cls':
 
@@ -122,7 +165,7 @@ class Embedding(nn.Module):
                 
                 batch_emb = self.model(batch["input_ids"], batch["attention_mask"])[0]
                 
-                batch_mean = torch.mean(batch_emb, dim=1)
+                batch_mean = self.tensor_mean(batch_emb, length_t=batch["length"])
                 batch_std = torch.std(batch_emb, dim=1)  
                 
                 batch_emb = torch.cat([batch_mean, batch_std], dim=1)
