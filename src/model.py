@@ -20,14 +20,15 @@ def get_tfidf_features(dataset, dim=3000):
     vectorizer.fit(dataset['train'][text_field])
         
     for split in dataset.keys():
+        # indices = dataset[split]._indices # XXX
+        # dataset[split]._indices = None    # XXX
         X_tmp = vectorizer.transform(dataset[split][text_field])
         X_tmp = list(X_tmp.todense())
         X_tmp = [np.asarray(row).reshape(-1) for row in X_tmp]
-        
-        indices = dataset[split]._indices # ***
-        dataset[split]._indices = None    # ***
+        indices = dataset[split]._indices # *** XXX
+        dataset[split]._indices = None    # *** XXX
         dataset[split] = dataset[split].add_column("additional_fts", X_tmp)
-        dataset[split]._indices = indices # ***
+        dataset[split]._indices = indices # *** XXX
         
         dataset[split].set_format(type='torch', columns=['input_ids', 
                                                          'attention_mask',
@@ -111,10 +112,10 @@ class Embedding(nn.Module):
             tmp_t = tmp_t.expand(batch_size, max_length).transpose(0,1)
             mask = (tmp_t <= length_t).expand(emb_dim, max_length, batch_size).transpose(0, 2)
             
-            batch = batch * mask
+            batch = (batch * mask)[:, 1:, :] # remove [CLS]'s embeddings
             batch = batch.sum(dim=1).transpose(0, 1)
             
-            mean_batch = torch.div(batch, length_t).transpose(0, 1)
+            mean_batch = torch.div(batch, length_t - 1).transpose(0, 1)
 
         return mean_batch
 
@@ -151,7 +152,7 @@ class Embedding(nn.Module):
 #             batch['attention_mask'][indices[:, 0], indices[:, 1]] = 0
             
             if (self.pooling == 'mean') or (self.pooling == 'mean_cls'):
-                
+            
                 batch_emb = self.model(batch["input_ids"], batch["attention_mask"])[0]
                                 
                 batch_emb = self.tensor_mean(batch_emb, length_t=batch["length"])
