@@ -7,6 +7,23 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from transformers import BertModel, DistilBertModel
 
 
+def tensorize_dataset(dataset):
+    """Tensorize the data features and labels"""
+        
+    for split in dataset.keys():
+        
+        dataset[split].set_format(type='torch', columns=['input_ids', 
+                                                         'attention_mask',
+                                                         'labels', 
+                                                         'length'])
+        # remove useless columns
+        for field in ['text', 'content', 'question_title']:
+            if field in dataset['train'].column_names:
+                dataset[split] = dataset[split].remove_columns(field)
+        
+    return dataset
+
+
 def get_tfidf_features(dataset, dim=3000):
     """Compute tf-idf features and add it as a new field for the dataset"""
     

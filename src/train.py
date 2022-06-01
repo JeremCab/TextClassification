@@ -96,8 +96,11 @@ def process_dataset(dataset, model, tokenizer, device=torch.device('cpu'), batch
     # 2. empty CUDA cache
     # 3. start new accumulation
     
-    # numpy tensors (for micro accumlation steps)        
-    dim = model.pooling_dim + dataset[0]['additional_fts'].shape[0]
+    # numpy tensors (for micro accumlation steps)
+    if 'additional_fts' in dataset.column_names:
+        dim = model.pooling_dim + dataset[0]['additional_fts'].shape[0]
+    else:
+        dim = model.pooling_dim
     outputs_np = np.empty(shape=(0, dim))
     labels_np = np.empty(shape=(0))
     
