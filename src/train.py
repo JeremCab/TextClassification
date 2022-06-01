@@ -187,19 +187,28 @@ def train_learning_algo(learning_algo, dataset, model, tokenizer,
 # In this way, the processing an be performed only once, while several learning algos 
 # (alpha's loop) can be tested for predictions (cf. experiment.py for further details).
 def predict(learning_algo, dataset, model, tokenizer, 
-            device=torch.device('cpu'), batch_size=256, mode='test'):
+            device=torch.device('cpu'), batch_size=256, 
+            predict_proba=False, 
+            mode='test'):
     """
     Compute train and test predictions for the dataset.
     """
     
+    if predict_proba:
+        predict = lambda x: learning_algo.predict_proba(x)
+        
+    else:
+        predict = lambda x: learning_algo.predict(x)
+    
     X_test, y_test = process_dataset(dataset['test'], model, tokenizer,
                                        device=device, batch_size=batch_size)
-    y_test_preds = learning_algo.predict(X_test)
+    y_test_preds = predict(X_test)
     
     if mode == 'train_test':
+        
         X_train, y_train = process_dataset(dataset['train'], model, tokenizer,
                                        device=device, batch_size=batch_size)
-        y_train_preds = learning_algo.predict(X_train)
+        y_train_preds = predict(X_train) 
     
         return  y_train, y_train_preds, y_test, y_test_preds
     

@@ -16,10 +16,10 @@ def tensorize_dataset(dataset):
                                                          'attention_mask',
                                                          'labels', 
                                                          'length'])
-        # remove useless columns
-        for field in ['text', 'content', 'question_title']:
-            if field in dataset['train'].column_names:
-                dataset[split] = dataset[split].remove_columns(field)
+#         # remove useless columns
+#         for field in ['text', 'content', 'question_title']:
+#             if field in dataset['train'].column_names:
+#                 dataset[split] = dataset[split].remove_columns(field)
         
     return dataset
 
